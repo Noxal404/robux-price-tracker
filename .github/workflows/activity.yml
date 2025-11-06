@@ -1,0 +1,22 @@
+name: Keep-Alive Activity
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+jobs:
+  build:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update keep-alive log
+        env:
+          TZ: 'Asia/Jakarta'
+        run: |
+          echo "Last keep-alive check on $(date)" > .github/keepalive.log
+          git config --global user.name 'github-actions'
+          git config --global user.email 'github-actions@github.com'
+          git add .github/keepalive.log
+          git commit -m "CHORE: Daily keep-alive commit" || exit 0
+          git push
