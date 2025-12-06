@@ -4,7 +4,7 @@ import json
 import re
 import cloudscraper
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 
 GIST_ID = os.environ.get('GIST_ID')
@@ -83,7 +83,11 @@ def scrape_site():
                     number_text = number_span.get_text(strip=True).replace(".", "")
                     if number_text.isdigit():
                         stock_number = int(number_text)
-                        stock_status = f"{stock_number:,} Tersedia".replace(",", ".")
+                        
+                        if stock_number == 0:
+                            stock_status = "Habis (0 Stok)"
+                        else:
+                            stock_status = f"{stock_number:,} Tersedia".replace(",", ".")
         else:
             timer_anchor = soup.find("span", string=re.compile(r'Stok\s*selanjutnya\s*dalam'))
             if timer_anchor:
@@ -117,6 +121,8 @@ def send_discord_notification(new_price, old_price, new_stock, old_stock, ping_e
         color = 3447003
     elif "HARGA NAIK" in title or "STOK HABIS" in title:
         color = 15158332
+    elif "STOK HAMPIR HABIS" in title:
+        color = 16776960
     elif "RESTOCK" in title:
         color = 3447003
     elif new_price != old_price:
@@ -146,6 +152,8 @@ def send_discord_notification(new_price, old_price, new_stock, old_stock, ping_e
         embed["description"] = "Harga Robux telah mencapai atau di bawah target!"
     elif "STOK HABIS" in title:
         embed["description"] = "Stok Robux saat ini telah habis."
+    elif "STOK HAMPIR HABIS" in title:
+        embed["description"] = "⚠️ Segera beli! Stok menipis di bawah 10.000!"
     
     data = {
         "content": content,
@@ -186,14 +194,25 @@ def main():
         print("Scraping failed, skipping this run.")
         return
 
-    old_stock_is_available = not old_stock.startswith("Habis")
-    new_stock_is_available = not new_stock.startswith("Habis")
+    def parse_stock_number(stock_str):
+        if "Tersedia" in stock_str:
+            digits = re.findall(r'\d+', stock_str.replace('.', ''))
+            if digits: return int(digits[0])
+        return 0
 
-    if new_price == old_price and old_stock_is_available == new_stock_is_available:
-        print(f"No changes. Price: {new_price}, Stock: {new_stock}")
+    new_stock_num = parse_stock_number(new_stock)
+    old_stock_num = parse_stock_number(old_stock)
+
+    crossed_low_threshold = (old_stock_num > 10000) and (0 < new_stock_num <= 10000)
+    is_stock_out = new_stock.startswith("Habis") and not old_stock.startswith("Habis")
+    is_restock = not new_stock.startswith("Habis") and old_stock.startswith("Habis")
+    is_price_changed = new_price != old_price
+
+    if not (crossed_low_threshold or is_stock_out or is_restock or is_price_changed):
+        print(f"No significant changes. Price: {new_price}, Stock: {new_stock}")
         return
 
-    print(f"Change detected! New Price: {new_price}, New Stock: {new_stock}")
+    print(f"Significant Change detected! New Price: {new_price}, New Stock: {new_stock}")
     
     title = "Perubahan Harga/Stok"
     ping = False
@@ -204,16 +223,17 @@ def main():
     elif new_price > target_price_int and old_price <= target_price_int and old_price != 0:
         title = "📈 HARGA NAIK MELEWATI TARGET 📈"
         ping = True
-    elif new_stock.startswith("Habis") and not old_stock.startswith("Habis"):
+    elif is_stock_out:
         title = "🚫 STOK HABIS 🚫"
         ping = True
-    elif not new_stock.startswith("Habis") and old_stock.startswith("Habis"):
+    elif is_restock:
         title = "✅ RESTOCK ✅"
+        ping = True
+    elif crossed_low_threshold:
+        title = "⚠️ STOK HAMPIR HABIS ⚠️"
         ping = True
     elif new_price != old_price:
         title = "🔔 Perubahan Harga 🔔"
-    elif new_stock != old_stock:
-        title = "🔔 Perubahan Stok 🔔"
 
     send_discord_notification(new_price, old_price, new_stock, old_stock, ping, title)
     
