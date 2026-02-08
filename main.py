@@ -50,7 +50,7 @@ def get_gist_data():
         content = r.json()['files'][GIST_FILENAME]['content']
         return json.loads(content)
     except Exception as e:
-        print(f"Error reading Gist: {e}")
+        print(f"Gist Error: {e}")
         return {}
 
 def update_gist_data(new_data):
@@ -58,38 +58,57 @@ def update_gist_data(new_data):
         payload = {"files": {GIST_FILENAME: {"content": json.dumps(new_data, indent=2)}}}
         requests.patch(GIST_API_URL, headers=GIST_HEADERS, json=payload, timeout=10)
     except Exception as e:
-        print(f"Error updating Gist: {e}")
+        print(f"Update Error: {e}")
 
 def scrape_site():
     try:
-        r = scraper.get(TARGET_URL, timeout=15)
+        r = scraper.get(TARGET_URL, timeout=20)
+        
+        if r.status_code == 403 or r.status_code == 503:
+            print(f"FAILED: Blocked by Cloudflare (Status {r.status_code})")
+            return None
+            
         r.raise_for_status()
         
+        if "Just a moment" in r.text or "Challenge" in r.text:
+            print("FAILED: Cloudflare Challenge Detected")
+            return None
+
         soup = BeautifulSoup(r.text, 'html.parser')
         results = {}
-        
+        items_found = 0
+
         for item in TRACK_ITEMS:
             price_found = 0
             status_found = "Habis"
-
-            label_el = soup.find("span", class_="amount", string=item["label"])
+            label_text = re.compile(re.escape(item["label"]), re.IGNORECASE)
+            text_node = soup.find(string=label_text)
             
-            if label_el:
-                card = label_el.find_parent(class_="main-info")
-                if card:
-                    price_el = card.find("span", class_="discounted-price")
-                    if price_el:
-                        price_text = price_el.get_text(strip=True).replace("Rp", "").replace(".", "")
-                        if price_text.isdigit():
-                            price_found = int(price_text)
+            if text_node:
+                current_element = text_node.parent
+                for _ in range(6):
+                    if current_element is None: break
+                    block_text = current_element.get_text(separator=" ", strip=True)
+                    match = re.search(r"Rp\s*([\d\.]+)", block_text)
+                    if match:
+                        raw_price = match.group(1).replace(".", "")
+                        if raw_price.isdigit():
+                            price_found = int(raw_price)
                             status_found = "Tersedia"
-            
+                            items_found += 1
+                            break
+                    current_element = current_element.parent
+
             results[item["id"]] = {"price": price_found, "status": status_found}
+        
+        if items_found == 0:
+            print("FAILED: Site loaded but elements not found (Web layout changed?)")
+            return None
             
         return results
 
     except Exception as e:
-        print(f"Error scraping: {e}")
+        print(f"FAILED: Connection error or timeout ({e})")
         return None
 
 def calculate_best_value(current_data):
@@ -113,7 +132,7 @@ def send_notification(current_data, old_data, target_prices):
     embed_fields = []
     
     print("-" * 40)
-    print("MARKET STATUS:")
+    print(f"MARKET STATUS ({utc_now.strftime('%H:%M:%S')} UTC):")
     
     for item in TRACK_ITEMS:
         item_id = item["id"]
@@ -127,7 +146,6 @@ def send_notification(current_data, old_data, target_prices):
         print(f"{item['label'].ljust(8)} : {price_display} ({curr['status']})")
 
         item_alert = ""
-        
         if curr['price'] <= target and old['price'] > target and curr['price'] > 0:
             should_ping = True
             change_detected = True
@@ -152,45 +170,35 @@ def send_notification(current_data, old_data, target_prices):
     print("-" * 40)
 
     if not change_detected:
-        print("No changes.")
+        print("SUCCESS: Data retrieved, no significant changes.")
         return
 
     color = 3066993
     if "TARGET" in title_suffix: color = 3447003
     elif "HABIS" in str(title_suffix): color = 15158332
-
     main_title = "🔔 Update Harga Robux"
     if title_suffix: main_title = f"🔔 {' & '.join(list(set(title_suffix)))} DETECTED!"
-
     best = calculate_best_value(current_data)
     footer_text = f"Created by {AUTH_NAME}"
     if best: footer_text = f"🏆 Best Value: {best['label']} (Rp {best['ratio']:.1f}/rbx) • {footer_text}"
-
-    embed = {
-        "title": main_title,
-        "url": TARGET_URL,
-        "color": color,
-        "timestamp": utc_now.isoformat(),
-        "fields": embed_fields,
-        "footer": {"text": footer_text}
-    }
+    embed = {"title": main_title, "url": TARGET_URL, "color": color, "timestamp": utc_now.isoformat(), "fields": embed_fields, "footer": {"text": footer_text}}
     embed["fields"].append({"name": "Link Toko", "value": f"[Klik di sini untuk beli]({TARGET_URL})", "inline": False})
-    
     data = {"content": "@everyone" if should_ping else "", "embeds": [embed], "username": "Robux Multi-Tracker"}
     try:
         requests.post(WEBHOOK_URL, json=data, timeout=10)
-        print("Notification sent!")
+        print("SUCCESS: Discord Notification sent!")
     except Exception as e:
-        print(f"Error discord: {e}")
+        print(f"Discord Notify Error: {e}")
 
 def main():
     print("Running Multi-Tracker...")
     if not all([GIST_ID, GIST_PAT, WEBHOOK_URL, TARGET_URL, AUTH_NAME, TARGET_PRICE_ENV]):
-        print("Missing env vars.")
+        print("ABORTED: Missing Environment Variables.")
         return
 
     current_data = scrape_site()
-    if not current_data: return
+    if not current_data:
+        return
 
     old_data = get_gist_data()
     target_prices = get_target_prices()
