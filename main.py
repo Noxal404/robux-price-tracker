@@ -29,12 +29,11 @@ TRACK_ITEMS = [
 ]
 
 scraper = cloudscraper.create_scraper(
-    browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
+    browser={'browser': 'chrome', 'platform': 'ios', 'mobile': True}
 )
 
 def get_target_prices():
-    if not TARGET_PRICE_ENV:
-        return {}
+    if not TARGET_PRICE_ENV: return {}
     try:
         prices = [int(x.strip()) for x in TARGET_PRICE_ENV.split(',')]
         return {
@@ -42,8 +41,7 @@ def get_target_prices():
             500: prices[1] if len(prices) > 1 else 0,
             1000: prices[2] if len(prices) > 2 else 0
         }
-    except:
-        return {100: 0, 500: 0, 1000: 0}
+    except: return {100: 0, 500: 0, 1000: 0}
 
 def get_gist_data():
     try:
@@ -64,29 +62,45 @@ def update_gist_data(new_data):
 
 def scrape_site():
     try:
-        r = scraper.get(TARGET_URL, timeout=10)
+        r = scraper.get(TARGET_URL, timeout=15)
         r.raise_for_status()
+        
+        if "Just a moment" in r.text or "Challenge" in r.text:
+            print("Block detected.")
+            return None
+
         soup = BeautifulSoup(r.text, 'html.parser')
-        
         results = {}
-        
+        found_any = False
+
         for item in TRACK_ITEMS:
-            label_el = soup.find(lambda tag: tag.name == "span" and "amount" in tag.get("class", []) and item["label"] in tag.text)
+            label_pattern = re.compile(re.escape(item["label"]), re.IGNORECASE)
+            label_el = soup.find(string=label_pattern)
             
+            price_found = 0
+            status_found = "Habis"
+
             if label_el:
-                card = label_el.find_parent(class_="main-info")
+                card = label_el.find_parent(lambda tag: tag.name == "div" and "Rp" in tag.get_text())
+                
                 if card:
-                    price_el = card.find(class_="discounted-price")
-                    if price_el:
-                        price_text = price_el.get_text(strip=True).replace("Rp", "").replace(".", "")
-                        results[item["id"]] = {
-                            "price": int(price_text),
-                            "status": "Tersedia"
-                        }
-                        continue
-            
-            results[item["id"]] = {"price": 0, "status": "Habis"}
-            
+                    card_text = card.get_text(separator=" ")
+                    match = re.search(r"Rp\s*([\d\.]+)", card_text)
+                    
+                    if match:
+                        clean_price = match.group(1).replace(".", "")
+                        if clean_price.isdigit():
+                            price_found = int(clean_price)
+                            status_found = "Tersedia"
+                            found_any = True
+
+            results[item["id"]] = {"price": price_found, "status": status_found}
+        
+        if not found_any:
+            print("No prices found. Saving debug.html")
+            with open("debug.html", "w", encoding="utf-8") as f:
+                f.write(r.text)
+
         return results
 
     except Exception as e:
@@ -96,32 +110,25 @@ def scrape_site():
 def calculate_best_value(current_data):
     best_item = None
     lowest_ratio = float('inf')
-    
     for item in TRACK_ITEMS:
         item_id = item["id"]
         data = current_data.get(item_id)
-        
         if data and data['status'] == "Tersedia" and data['price'] > 0:
             ratio = data['price'] / item['amount']
             if ratio < lowest_ratio:
                 lowest_ratio = ratio
-                best_item = {
-                    "label": item["label"],
-                    "price": data['price'],
-                    "ratio": ratio
-                }
+                best_item = {"label": item["label"], "price": data['price'], "ratio": ratio}
     return best_item
 
 def send_notification(current_data, old_data, target_prices):
     utc_now = datetime.now(pytz.utc)
-    
     should_ping = False
     change_detected = False
     title_suffix = []
     embed_fields = []
     
     print("-" * 40)
-    print("📊 CURRENT MARKET STATUS:")
+    print("MARKET STATUS:")
     
     for item in TRACK_ITEMS:
         item_id = item["id"]
@@ -131,8 +138,8 @@ def send_notification(current_data, old_data, target_prices):
         
         status_emoji = "🔴" if curr['status'] == "Habis" else "🟢"
         price_display = f"Rp {curr['price']:,}".replace(",", ".") if curr['price'] > 0 else "-"
-
-        print(f"📦 {item['label'].ljust(8)} : {price_display} ({curr['status']})")
+        
+        print(f"{item['label'].ljust(8)} : {price_display} ({curr['status']})")
 
         item_alert = ""
         
@@ -141,17 +148,14 @@ def send_notification(current_data, old_data, target_prices):
             change_detected = True
             item_alert = "🔥 **TARGET!**"
             title_suffix.append("TARGET")
-        
         elif curr['status'] == "Tersedia" and old['status'] == "Habis":
             should_ping = True
             change_detected = True
             item_alert = "✅ **RESTOCK**"
             title_suffix.append("RESTOCK")
-            
         elif curr['status'] == "Habis" and old['status'] == "Tersedia":
             change_detected = True
             item_alert = "🚫 **HABIS**"
-            
         elif curr['price'] != old['price'] and curr['price'] > 0 and old['price'] > 0:
             change_detected = True
             arrow = "📉" if curr['price'] < old['price'] else "📈"
@@ -163,7 +167,7 @@ def send_notification(current_data, old_data, target_prices):
     print("-" * 40)
 
     if not change_detected:
-        print("✅ No significant changes (Silent Mode).")
+        print("No changes.")
         return
 
     color = 3066993
@@ -171,13 +175,11 @@ def send_notification(current_data, old_data, target_prices):
     elif "HABIS" in str(title_suffix): color = 15158332
 
     main_title = "🔔 Update Harga Robux"
-    if title_suffix:
-        main_title = f"🔔 {' & '.join(list(set(title_suffix)))} DETECTED!"
+    if title_suffix: main_title = f"🔔 {' & '.join(list(set(title_suffix)))} DETECTED!"
 
     best = calculate_best_value(current_data)
     footer_text = f"Created by {AUTH_NAME}"
-    if best:
-        footer_text = f"🏆 Best Value: {best['label']} (Rp {best['ratio']:.1f}/rbx) • {footer_text}"
+    if best: footer_text = f"🏆 Best Value: {best['label']} (Rp {best['ratio']:.1f}/rbx) • {footer_text}"
 
     embed = {
         "title": main_title,
@@ -187,34 +189,26 @@ def send_notification(current_data, old_data, target_prices):
         "fields": embed_fields,
         "footer": {"text": footer_text}
     }
-    
     embed["fields"].append({"name": "Link Toko", "value": f"[Klik di sini untuk beli]({TARGET_URL})", "inline": False})
     
-    data = {
-        "content": "@everyone" if should_ping else "",
-        "embeds": [embed],
-        "username": "Robux Multi-Tracker"
-    }
-    
+    data = {"content": "@everyone" if should_ping else "", "embeds": [embed], "username": "Robux Multi-Tracker"}
     try:
         requests.post(WEBHOOK_URL, json=data, timeout=10)
-        print("🔔 Discord Notification sent!")
+        print("Notification sent!")
     except Exception as e:
         print(f"Error discord: {e}")
 
 def main():
     print("Running Multi-Tracker...")
     if not all([GIST_ID, GIST_PAT, WEBHOOK_URL, TARGET_URL, AUTH_NAME, TARGET_PRICE_ENV]):
-        print("Missing env vars (Check Secrets).")
+        print("Missing env vars.")
         return
 
     current_data = scrape_site()
-    if not current_data:
-        return
+    if not current_data: return
 
     old_data = get_gist_data()
     target_prices = get_target_prices()
-    
     send_notification(current_data, old_data, target_prices)
     update_gist_data(current_data)
 
