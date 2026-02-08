@@ -9,6 +9,11 @@ import pytz
 
 GIST_ID = os.environ.get('GIST_ID')
 GIST_PAT = os.environ.get('GIST_PAT')
+WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
+TARGET_URL = os.environ.get('TARGET_URL')
+AUTH_NAME = os.environ.get('AUTH_NAME')
+TARGET_PRICE_ENV = os.environ.get('TARGET_PRICE')
+
 GIST_API_URL = f"https://api.github.com/gists/{GIST_ID}"
 GIST_HEADERS = {
     "Authorization": f"token {GIST_PAT}",
@@ -17,41 +22,43 @@ GIST_HEADERS = {
 }
 GIST_FILENAME = "database.json"
 
-WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL')
-TARGET_URL = os.environ.get('TARGET_URL')
-AUTH_NAME = os.environ.get('AUTH_NAME')
-TARGET_PRICE = os.environ.get('TARGET_PRICE')
+TRACK_ITEMS = [
+    {"label": "100RBX", "amount": 100, "id": "100"},
+    {"label": "500RBX", "amount": 500, "id": "500"},
+    {"label": "1.000RBX", "amount": 1000, "id": "1000"}
+]
 
 scraper = cloudscraper.create_scraper(
-    browser={
-        'browser': 'chrome',
-        'platform': 'windows',
-        'mobile': False
-    }
+    browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
 )
+
+def get_target_prices():
+    if not TARGET_PRICE_ENV:
+        return {}
+    try:
+        prices = [int(x.strip()) for x in TARGET_PRICE_ENV.split(',')]
+        return {
+            100: prices[0] if len(prices) > 0 else 0,
+            500: prices[1] if len(prices) > 1 else 0,
+            1000: prices[2] if len(prices) > 2 else 0
+        }
+    except:
+        return {100: 0, 500: 0, 1000: 0}
 
 def get_gist_data():
     try:
         r = requests.get(GIST_API_URL, headers=GIST_HEADERS, timeout=10)
         r.raise_for_status()
-        data = r.json()
-        content = data['files'][GIST_FILENAME]['content']
+        content = r.json()['files'][GIST_FILENAME]['content']
         return json.loads(content)
     except Exception as e:
         print(f"Error reading Gist: {e}")
-        return None
+        return {}
 
 def update_gist_data(new_data):
     try:
-        payload = {
-            "files": {
-                GIST_FILENAME: {
-                    "content": json.dumps(new_data, indent=2)
-                }
-            }
-        }
-        r = requests.patch(GIST_API_URL, headers=GIST_HEADERS, json=payload, timeout=10)
-        r.raise_for_status()
+        payload = {"files": {GIST_FILENAME: {"content": json.dumps(new_data, indent=2)}}}
+        requests.patch(GIST_API_URL, headers=GIST_HEADERS, json=payload, timeout=10)
     except Exception as e:
         print(f"Error updating Gist: {e}")
 
@@ -61,188 +68,149 @@ def scrape_site():
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        price_text = soup.find(string=re.compile(r"Rp[\d\.]+/100\s*Robux"))
-        if not price_text:
-            raise ValueError("Price element not found")
+        results = {}
         
-        match = re.search(r"Rp([\d\.]+)/100", price_text)
-        if not match:
-            raise ValueError("Price regex failed")
-        
-        current_price = int(match.group(1).replace(".", ""))
-        
-        stock_status = "Habis"
-        stock_available_span = soup.find("span", string=re.compile(r"Stok\s*Tersedia"))
-        
-        if stock_available_span:
-            stock_status = "Tersedia"
-            parent_div = stock_available_span.find_parent("div")
-            if parent_div:
-                number_span = parent_div.find("span", class_="font-bold")
-                if number_span:
-                    number_text = number_span.get_text(strip=True).replace(".", "")
-                    if number_text.isdigit():
-                        stock_number = int(number_text)
-                        
-                        if stock_number == 0:
-                            stock_status = "Habis (0 Stok)"
-                        else:
-                            stock_status = f"{stock_number:,} Tersedia".replace(",", ".")
-        else:
-            timer_anchor = soup.find("span", string=re.compile(r'Stok\s*selanjutnya\s*dalam'))
-            if timer_anchor:
-                parent_span = timer_anchor.find_parent("span")
-                if parent_span:
-                    timer_span = parent_span.find("span", class_="font-bold")
-                    if timer_span:
-                        timer = timer_span.get_text(strip=True)
-                        stock_status = f"Habis (Restock: {timer})"
-                    else:
-                        stock_status = "Habis (Info timer tidak ditemukan)"
-                else:
-                    stock_status = "Habis (Info timer tidak ditemukan)"
-            else:
-                stock_status = "Habis (Info restock tidak ada)"
-                
-        return current_price, stock_status
-    
-    except cloudscraper.exceptions.CloudflareException as e:
-        print(f"Cloudflare block detected: {e}")
-        return None, None
-    except Exception as e:
-        print(f"Error scraping site: {e}")
-        return None, None
+        for item in TRACK_ITEMS:
+            label_el = soup.find(lambda tag: tag.name == "span" and "amount" in tag.get("class", []) and item["label"] in tag.text)
+            
+            if label_el:
+                card = label_el.find_parent(class_="main-info")
+                if card:
+                    price_el = card.find(class_="discounted-price")
+                    if price_el:
+                        price_text = price_el.get_text(strip=True).replace("Rp", "").replace(".", "")
+                        results[item["id"]] = {
+                            "price": int(price_text),
+                            "status": "Tersedia"
+                        }
+                        continue
+            
+            results[item["id"]] = {"price": 0, "status": "Habis"}
+            
+        return results
 
-def send_discord_notification(new_price, old_price, new_stock, old_stock, ping_everyone=False, title=""):
-    content = "@everyone" if ping_everyone else ""
+    except Exception as e:
+        print(f"Error scraping: {e}")
+        return None
+
+def calculate_best_value(current_data):
+    best_item = None
+    lowest_ratio = float('inf')
     
-    color = 3066993
-    if "TARGET TERCAPAI" in title:
-        color = 3447003
-    elif "HARGA NAIK" in title or "STOK HABIS" in title:
-        color = 15158332
-    elif "STOK HAMPIR HABIS" in title:
-        color = 16776960
-    elif "RESTOCK" in title:
-        color = 3447003
-    elif new_price != old_price:
-        color = 15844367
-    
+    for item in TRACK_ITEMS:
+        item_id = item["id"]
+        data = current_data.get(item_id)
+        
+        if data and data['status'] == "Tersedia" and data['price'] > 0:
+            ratio = data['price'] / item['amount']
+            if ratio < lowest_ratio:
+                lowest_ratio = ratio
+                best_item = {
+                    "label": item["label"],
+                    "price": data['price'],
+                    "ratio": ratio
+                }
+    return best_item
+
+def send_notification(current_data, old_data, target_prices):
     utc_now = datetime.now(pytz.utc)
     
+    should_ping = False
+    change_detected = False
+    title_suffix = []
+    
+    embed_fields = []
+    
+    for item in TRACK_ITEMS:
+        item_id = item["id"]
+        curr = current_data.get(item_id)
+        old = old_data.get(item_id, {"price": 0, "status": "Unknown"})
+        target = target_prices.get(item["amount"], 0)
+        
+        status_emoji = "🔴" if curr['status'] == "Habis" else "🟢"
+        price_display = f"Rp {curr['price']:,}".replace(",", ".") if curr['price'] > 0 else "-"
+        
+        item_alert = ""
+        
+        if curr['price'] <= target and old['price'] > target and curr['price'] > 0:
+            should_ping = True
+            change_detected = True
+            item_alert = "🔥 **TARGET!**"
+            title_suffix.append("TARGET")
+        
+        elif curr['status'] == "Tersedia" and old['status'] == "Habis":
+            should_ping = True
+            change_detected = True
+            item_alert = "✅ **RESTOCK**"
+            title_suffix.append("RESTOCK")
+            
+        elif curr['status'] == "Habis" and old['status'] == "Tersedia":
+            change_detected = True
+            item_alert = "🚫 **HABIS**"
+            
+        elif curr['price'] != old['price'] and curr['price'] > 0 and old['price'] > 0:
+            change_detected = True
+            arrow = "📉" if curr['price'] < old['price'] else "📈"
+            item_alert = f"{arrow} {price_display}"
+
+        field_value = f"Harga: **{price_display}**\nStatus: {status_emoji} {curr['status']}\n{item_alert}"
+        embed_fields.append({"name": f"📦 {item['label']}", "value": field_value, "inline": True})
+
+    if not change_detected:
+        print("No significant changes.")
+        return
+
+    color = 3066993
+    if "TARGET" in title_suffix: color = 3447003
+    elif "HABIS" in str(title_suffix): color = 15158332
+
+    main_title = "🔔 Update Harga Robux"
+    if title_suffix:
+        main_title = f"🔔 {' & '.join(list(set(title_suffix)))} DETECTED!"
+
+    best = calculate_best_value(current_data)
+    footer_text = f"Created by {AUTH_NAME}"
+    if best:
+        footer_text = f"🏆 Best Value: {best['label']} (Rp {best['ratio']:.1f}/rbx) • {footer_text}"
+
     embed = {
-        "title": title,
-        "description": f"Harga baru Robux telah terdeteksi.",
+        "title": main_title,
         "url": TARGET_URL,
         "color": color,
         "timestamp": utc_now.isoformat(),
-        "fields": [
-            {"name": "Harga Sekarang (per 100 Robux)", "value": f"**Rp {new_price:,}**".replace(",", "."), "inline": True},
-            {"name": "Harga Sebelumnya", "value": f"Rp {old_price:,}".replace(",", "."), "inline": True},
-            {"name": "Stok Sekarang", "value": new_stock, "inline": False}
-        ],
-        "footer": {
-            "text": f"Created by {AUTH_NAME}"
-        }
+        "fields": embed_fields,
+        "footer": {"text": footer_text}
     }
     
-    embed["fields"].append({"name": "Link Toko", "value": f"[Klik di sini]({TARGET_URL})", "inline": False})
-    
-    if "TARGET TERCAPAI" in title:
-        embed["description"] = "Harga Robux telah mencapai atau di bawah target!"
-    elif "STOK HABIS" in title:
-        embed["description"] = "Stok Robux saat ini telah habis."
-    elif "STOK HAMPIR HABIS" in title:
-        embed["description"] = "⚠️ Segera beli! Stok menipis di bawah 10.000!"
+    embed["fields"].append({"name": "Link Toko", "value": f"[Klik di sini untuk beli]({TARGET_URL})", "inline": False})
     
     data = {
-        "content": content,
+        "content": "@everyone" if should_ping else "",
         "embeds": [embed],
-        "username": "Robux Price Monitor"
+        "username": "Robux Multi-Tracker"
     }
     
     try:
-        r = requests.post(WEBHOOK_URL, json=data, timeout=10)
-        r.raise_for_status()
+        requests.post(WEBHOOK_URL, json=data, timeout=10)
+        print("Notification sent.")
     except Exception as e:
-        print(f"Error sending Discord notification: {e}")
+        print(f"Error discord: {e}")
 
 def main():
-    print("Running Robux Monitor...")
-    
-    if not all([GIST_ID, GIST_PAT, WEBHOOK_URL, TARGET_URL, AUTH_NAME, TARGET_PRICE]):
-        print("Missing one or more critical environment variables (GIST_ID, GIST_PAT, WEBHOOK_URL, TARGET_URL, AUTH_NAME, TARGET_PRICE).")
+    print("Running Multi-Tracker...")
+    if not all([GIST_ID, GIST_PAT, WEBHOOK_URL, TARGET_URL, AUTH_NAME, TARGET_PRICE_ENV]):
+        print("Missing env vars (Check Secrets).")
         return
 
-    try:
-        target_price_int = int(TARGET_PRICE)
-    except ValueError:
-        print(f"Invalid TARGET_PRICE. Must be a number. Got: {TARGET_PRICE}")
+    current_data = scrape_site()
+    if not current_data:
         return
 
     old_data = get_gist_data()
-    if not old_data:
-        print("Failed to get old data, initializing...")
-        old_data = {"harga_terakhir": 0, "status_stok_terakhir": "Unknown"}
+    target_prices = get_target_prices()
     
-    old_price = old_data.get("harga_terakhir", 0)
-    old_stock = old_data.get("status_stok_terakhir", "Unknown")
-    
-    new_price, new_stock = scrape_site()
-    
-    if new_price is None or new_stock is None:
-        print("Scraping failed, skipping this run.")
-        return
-
-    def parse_stock_number(stock_str):
-        if "Tersedia" in stock_str:
-            digits = re.findall(r'\d+', stock_str.replace('.', ''))
-            if digits: return int(digits[0])
-        return 0
-
-    new_stock_num = parse_stock_number(new_stock)
-    old_stock_num = parse_stock_number(old_stock)
-
-    crossed_low_threshold = (old_stock_num > 10000) and (0 < new_stock_num <= 10000)
-    is_stock_out = new_stock.startswith("Habis") and not old_stock.startswith("Habis")
-    is_restock = not new_stock.startswith("Habis") and old_stock.startswith("Habis")
-    is_price_changed = new_price != old_price
-
-    if not (crossed_low_threshold or is_stock_out or is_restock or is_price_changed):
-        print(f"No significant changes. Price: {new_price}, Stock: {new_stock}")
-        return
-
-    print(f"Significant Change detected! New Price: {new_price}, New Stock: {new_stock}")
-    
-    title = "Perubahan Harga/Stok"
-    ping = False
-    
-    if new_price <= target_price_int and old_price > target_price_int:
-        title = "🔥 TARGET TERCAPAI 🔥"
-        ping = True
-    elif new_price > target_price_int and old_price <= target_price_int and old_price != 0:
-        title = "📈 HARGA NAIK MELEWATI TARGET 📈"
-        ping = True
-    elif is_stock_out:
-        title = "🚫 STOK HABIS 🚫"
-        ping = True
-    elif is_restock:
-        title = "✅ RESTOCK ✅"
-        ping = True
-    elif crossed_low_threshold:
-        title = "⚠️ STOK HAMPIR HABIS ⚠️"
-        ping = True
-    elif new_price != old_price:
-        title = "🔔 Perubahan Harga 🔔"
-
-    send_discord_notification(new_price, old_price, new_stock, old_stock, ping, title)
-    
-    update_gist_data({
-        "harga_terakhir": new_price,
-        "status_stok_terakhir": new_stock
-    })
-    
-    print("Notification sent and Gist updated.")
+    send_notification(current_data, old_data, target_prices)
+    update_gist_data(current_data)
 
 if __name__ == "__main__":
     main()
