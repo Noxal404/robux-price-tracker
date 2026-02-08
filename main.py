@@ -29,7 +29,7 @@ TRACK_ITEMS = [
 ]
 
 scraper = cloudscraper.create_scraper(
-    browser={'browser': 'chrome', 'platform': 'ios', 'mobile': True}
+    browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
 )
 
 def get_target_prices():
@@ -65,42 +65,27 @@ def scrape_site():
         r = scraper.get(TARGET_URL, timeout=15)
         r.raise_for_status()
         
-        if "Just a moment" in r.text or "Challenge" in r.text:
-            print("Block detected.")
-            return None
-
         soup = BeautifulSoup(r.text, 'html.parser')
         results = {}
-        found_any = False
-
+        
         for item in TRACK_ITEMS:
-            label_pattern = re.compile(re.escape(item["label"]), re.IGNORECASE)
-            label_el = soup.find(string=label_pattern)
-            
             price_found = 0
             status_found = "Habis"
 
+            label_el = soup.find("span", class_="amount", string=item["label"])
+            
             if label_el:
-                card = label_el.find_parent(lambda tag: tag.name == "div" and "Rp" in tag.get_text())
-                
+                card = label_el.find_parent(class_="main-info")
                 if card:
-                    card_text = card.get_text(separator=" ")
-                    match = re.search(r"Rp\s*([\d\.]+)", card_text)
-                    
-                    if match:
-                        clean_price = match.group(1).replace(".", "")
-                        if clean_price.isdigit():
-                            price_found = int(clean_price)
+                    price_el = card.find("span", class_="discounted-price")
+                    if price_el:
+                        price_text = price_el.get_text(strip=True).replace("Rp", "").replace(".", "")
+                        if price_text.isdigit():
+                            price_found = int(price_text)
                             status_found = "Tersedia"
-                            found_any = True
-
+            
             results[item["id"]] = {"price": price_found, "status": status_found}
-        
-        if not found_any:
-            print("No prices found. Saving debug.html")
-            with open("debug.html", "w", encoding="utf-8") as f:
-                f.write(r.text)
-
+            
         return results
 
     except Exception as e:
