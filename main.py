@@ -118,8 +118,10 @@ def send_notification(current_data, old_data, target_prices):
     should_ping = False
     change_detected = False
     title_suffix = []
-    
     embed_fields = []
+    
+    print("-" * 40)
+    print("📊 CURRENT MARKET STATUS:")
     
     for item in TRACK_ITEMS:
         item_id = item["id"]
@@ -129,7 +131,9 @@ def send_notification(current_data, old_data, target_prices):
         
         status_emoji = "🔴" if curr['status'] == "Habis" else "🟢"
         price_display = f"Rp {curr['price']:,}".replace(",", ".") if curr['price'] > 0 else "-"
-        
+
+        print(f"📦 {item['label'].ljust(8)} : {price_display} ({curr['status']})")
+
         item_alert = ""
         
         if curr['price'] <= target and old['price'] > target and curr['price'] > 0:
@@ -156,8 +160,10 @@ def send_notification(current_data, old_data, target_prices):
         field_value = f"Harga: **{price_display}**\nStatus: {status_emoji} {curr['status']}\n{item_alert}"
         embed_fields.append({"name": f"📦 {item['label']}", "value": field_value, "inline": True})
 
+    print("-" * 40)
+
     if not change_detected:
-        print("No significant changes.")
+        print("✅ No significant changes (Silent Mode).")
         return
 
     color = 3066993
@@ -192,7 +198,7 @@ def send_notification(current_data, old_data, target_prices):
     
     try:
         requests.post(WEBHOOK_URL, json=data, timeout=10)
-        print("Notification sent.")
+        print("🔔 Discord Notification sent!")
     except Exception as e:
         print(f"Error discord: {e}")
 
